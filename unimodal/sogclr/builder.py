@@ -108,6 +108,150 @@ class SimCLR(nn.Module):
 
         return nn.Sequential(*mlp)
 
+    def contrastive_loss(
+        self, 
+        i,
+        hidden1, 
+        hidden2, 
+        **kwargs
+    ):
+        # Get (normalized) hidden1 and hidden2.
+        hidden1, hidden2 = F.normalize(hidden1, p=2, dim=1), F.normalize(hidden2, p=2, dim=1)
+        batch_size = hidden1.shape[0]
+
+        ''' Note: **
+        Cosine similarity matrix of all samples in batch:
+        a = z_i
+        b = z_j
+         ____ ____
+        | aa | ab |
+        |____|____|
+        | ba | bb |
+        |____|____|
+        Postives:
+        Diagonals of ab and ba '\'
+        Negatives:
+        All values that do not lie on leading diagonals of aa, bb, ab, ba.
+        '''
+
+        # diagonal are positive labels (1), rest negative (0)
+        labels = F.one_hot(torch.arange(batch_size, dtype=torch.long, device=self.device), batch_size * 2)
+        masks  = F.one_hot(torch.arange(batch_size, dtype=torch.long, device=self.device), batch_size)
+
+        # similarity between all views (cosine since previously normalized)
+        logits_aa = torch.matmul(hidden1, hidden1.T)/ self.T
+        logits_bb = torch.matmul(hidden2, hidden2.T)/ self.T
+        logits_ab = torch.matmul(hidden1, hidden2.T)/ self.T
+        logits_ba = torch.matmul(hidden2, hidden1.T)/ self.T
+
+        # mask diagonal (self-similarities)
+        logits_aa = logits_aa - masks * self.LARGE_NUM
+        logits_bb = logits_bb - masks * self.LARGE_NUM
+
+        # logits for a and for b
+        logits_ab_aa = torch.cat([logits_ab, logits_aa ], 1) 
+        logits_ba_bb = torch.cat([logits_ba, logits_bb ], 1) 
+
+        # compute cross entropy
+        def softmax_cross_entropy_with_logits(labels, logits):
+            #logits = logits - torch.max(logits)
+            expsum_neg_logits = torch.sum(torch.exp(logits), dim=1, keepdim=True)
+            normalized_logits = logits - torch.log(expsum_neg_logits)
+            return -torch.sum(labels * normalized_logits, dim=1)
+
+        loss_a = softmax_cross_entropy_with_logits(labels, logits_ab_aa)
+        loss_b = softmax_cross_entropy_with_logits(labels, logits_ba_bb)
+        
+        # take mean of losses per batch
+        loss = (loss_a + loss_b).mean()
+        return loss, {}
+    
+    def glofnd_contrastive_loss(
+        self, 
+        i,
+        lda,
+        hidden1, 
+        hidden2, 
+        index,
+        epoch,
+        class_labels=None,
+        **kwargs
+    ):
+        # Get (normalized) hidden1 and hidden2.
+        hidden1, hidden2 = F.normalize(hidden1, p=2, dim=1), F.normalize(hidden2, p=2, dim=1)
+        batch_size = hidden1.shape[0]
+
+        ''' Note: **
+        Cosine similarity matrix of all samples in batch:
+        a = z_i
+        b = z_j
+         ____ ____
+        | aa | ab |
+        |____|____|
+        | ba | bb |
+        |____|____|
+        Postives:
+        Diagonals of ab and ba '\'
+        Negatives:
+        All values that do not lie on leading diagonals of aa, bb, ab, ba.
+        '''
+
+        # diagonal are positive labels (1), rest negative (0)
+        labels = F.one_hot(torch.arange(batch_size, dtype=torch.long, device=self.device), batch_size * 2)
+        masks  = F.one_hot(torch.arange(batch_size, dtype=torch.long, device=self.device), batch_size)
+
+        # similarity between all views (cosine since previously normalized)
+        logits_aa = torch.matmul(hidden1, hidden1.T)#/ self.T
+        logits_bb = torch.matmul(hidden2, hidden2.T)#/ self.T
+        logits_ab = torch.matmul(hidden1, hidden2.T)#/ self.T
+        logits_ba = torch.matmul(hidden2, hidden1.T)#/ self.T
+
+        t_logits_ab_aa = torch.cat([logits_ab, logits_aa ], 1).detach().clone()
+        t_logits_ba_bb = torch.cat([logits_ba, logits_bb ], 1).detach().clone()
+
+        logits_aa = logits_aa / self.T
+        logits_bb = logits_bb / self.T
+        logits_ab = logits_ab / self.T
+        logits_ba = logits_ba / self.T
+
+        # mask diagonal (self-similarities)
+        logits_aa = logits_aa - masks * self.LARGE_NUM
+        logits_bb = logits_bb - masks * self.LARGE_NUM
+
+        # logits for a and for b
+        logits_ab_aa = torch.cat([logits_ab, logits_aa ], 1) 
+        logits_ba_bb = torch.cat([logits_ba, logits_bb ], 1) 
+
+        # Compute GloFND mask
+        neg_self_mask = 1 - masks.repeat(1, 2)
+        assert neg_self_mask[0].sum() == 2*(batch_size - 1)
+
+        with torch.no_grad():
+            # update lambda threshold
+            log_update = lda.update(sim=[t_logits_ab_aa, t_logits_ba_bb], idx=index, neg_self_mask=neg_self_mask, epoch=epoch)
+            # compute masks
+            mask_ab_aa, sum_ab_aa, log_mask_ab_aa = lda.get_mask(t_logits_ab_aa, index, neg_self_mask, epoch=epoch, labels=class_labels)
+            mask_ba_bb, sum_ba_bb, log_mask_ba_bb = lda.get_mask(t_logits_ba_bb, index, neg_self_mask, epoch=epoch, labels=class_labels)
+        
+        def softmax_cross_entropy_with_logits(labels, logits, mask, sum_mask):
+            exp_logits = torch.exp(logits)
+            expsum_neg_logits = torch.sum(exp_logits * mask, dim=1, keepdim=True) / sum_mask * (2 * (batch_size - 1)) + exp_logits[labels.bool()].unsqueeze(1)
+            normalized_logits = logits - torch.log(expsum_neg_logits)
+            return -torch.sum(labels * normalized_logits, dim=1)
+
+        loss_a = softmax_cross_entropy_with_logits(labels, logits_ab_aa, mask_ab_aa.detach().int(), sum_ab_aa.detach().int())
+        loss_b = softmax_cross_entropy_with_logits(labels, logits_ba_bb, mask_ba_bb.detach().int(), sum_ba_bb.detach().int())
+        # take mean of losses per batch
+        loss = (loss_a + loss_b).mean()
+        
+        # compute logging info
+        self.log(i, lda, log_update, log_mask_ab_aa, log_mask_ba_bb, neg_self_mask, index)
+        # log_update = {f"{k}/{i}":v for k,v in log_update.items()}
+        # log_update[f"loss/{i}"] = loss.item()
+        log_update[f"loss"] = loss.item()
+
+        return loss, log_update
+
     def dynamic_contrastive_loss(
         self,
         i,
@@ -280,8 +424,9 @@ class SimCLR(nn.Module):
 
         # compute logging info
         self.log(i, lda, log_update, log_mask_ab_aa, log_mask_ba_bb, neg_self_mask, index)
-        log_update = {f"{k}/{i}":v for k,v in log_update.items()}
-        log_update[f"loss/{i}"] = loss.item()
+        # log_update = {f"{k}/{i}":v for k,v in log_update.items()}
+        # log_update[f"loss/{i}"] = loss.item()
+        log_update[f"loss"] = loss.item()
 
         return loss, log_update
 
@@ -345,8 +490,8 @@ class SimCLR(nn.Module):
         # compute features
         h1 = self.base_encoder(x1)
         h2 = self.base_encoder(x2)
-        losses = []
-        logs_d = {}
+        losses_list = []
+        logs_d_list = []
         for i, lda in enumerate(self.lambda_threshold):
             u = self.u[i]
             if self.loss_type == 'dcl':
@@ -354,13 +499,33 @@ class SimCLR(nn.Module):
                     loss, log_d = self.dynamic_contrastive_loss(i, u, h1, h2, index, **kwargs)
                 else:
                     loss, log_d = self.glofnd_dynamic_contrastive_loss(i, u, lda, h1, h2, index, class_labels=class_labels, **kwargs)
+            elif self.loss_type == 'cl':
+                if lda.glofnd_type is None:
+                    # loss, log_d = self.contrastive_loss(i, h1, h2, **kwargs)
+                    loss, log_d = self.glofnd_contrastive_loss(i, lda, h1, h2, index, class_labels=class_labels, **kwargs)
+                else:
+                    loss, log_d = self.glofnd_contrastive_loss(i, lda, h1, h2, index, class_labels=class_labels, **kwargs)
             else:
                 raise ValueError(f"Invalid loss type: {self.loss_type}")
             
-            losses.append(loss)
-            logs_d.update(log_d)
+            losses_list.append(loss)
+            logs_d_list.append(log_d)
 
-        loss = torch.mean(torch.stack(losses))
+        logs_d = {}
+        keys = []
+        for i,d in enumerate(logs_d_list):
+            # logs_d.update({f"{k}/{i}":v for k,v in log_update.items()})
+            for k, v in d.items():
+                if k in logs_d:
+                    logs_d[k].append(v)
+                else:
+                    logs_d[k] = [v]
+                    keys.append(k)
+                logs_d[f"{k}/{i}"] = v
+        for k in keys:
+            logs_d[k] = torch.as_tensor([logs_d[k]]).mean(0)
+            
+        loss = torch.mean(torch.stack(losses_list))
         
         if get_hidden:
             raise NotImplementedError

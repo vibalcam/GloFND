@@ -23,7 +23,7 @@ num_gpus=$SLURM_NTASKS
 num_nodes=$SLURM_NNODES
 
 ###### Params for both ######
-export WANDB_MODE="disabled"
+export WANDB_MODE="offline"
 export MASTER_ADDR=$master_addr
 export MASTER_PORT=12805
 export PYTHONPATH="$PYTHONPATH:$PWD/src"
@@ -146,5 +146,3 @@ case $loss_type in
         exit 1
         ;;
 esac
-
-    echo "Running $name evaluate"

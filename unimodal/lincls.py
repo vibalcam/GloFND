@@ -71,9 +71,9 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
-parser.add_argument('--rank', default=-1, type=int,
-                    help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
+# parser.add_argument('--rank', default=-1, type=int,
+#                     help='node rank for distributed training')
+parser.add_argument('--dist-url', default='env://', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
@@ -114,6 +114,27 @@ def set_all_seeds(SEED):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
+
+def world_info_from_env():
+    local_rank = 0
+    for v in ('LOCAL_RANK', 'MPI_LOCALRANKID', 'SLURM_LOCALID', 'OMPI_COMM_WORLD_LOCAL_RANK'):
+        if v in os.environ:
+            local_rank = int(os.environ[v])
+            break
+    global_rank = 0
+    for v in ('RANK', 'PMI_RANK', 'SLURM_PROCID', 'OMPI_COMM_WORLD_RANK'):
+        if v in os.environ:
+            global_rank = int(os.environ[v])
+            break
+    world_size = 1
+    for v in ('WORLD_SIZE', 'PMI_SIZE', 'SLURM_NTASKS', 'OMPI_COMM_WORLD_SIZE'):
+        if v in os.environ:
+            world_size = int(os.environ[v])
+            break
+
+    return local_rank, global_rank, world_size
+
+
 def main():
     args = parser.parse_args()
 
@@ -131,10 +152,10 @@ def main():
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
+
+    # if args.distributed and args.dist_url == "env://" and args.world_size == -1:
+    #     args.world_size = int(os.environ["WORLD_SIZE"])
 
     ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
@@ -156,24 +177,58 @@ def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
 
     # suppress printing if not master
-    if args.multiprocessing_distributed and args.gpu != 0:
-        def print_pass(*args):
-            pass
-        builtins.print = print_pass
+    # if args.multiprocessing_distributed and args.gpu != 0:
+    #     def print_pass(*args):
+    #         pass
+    #     builtins.print = print_pass
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
+    # if args.distributed:
+    #     if args.dist_url == "env://" and args.rank == -1:
+    #         args.rank = int(os.environ["RANK"])
+    #     if args.multiprocessing_distributed:
+    #         # For multiprocessing distributed training, rank needs to be the
+    #         # global rank among all the processes
+    #         args.rank = args.rank * ngpus_per_node + gpu
+    #     dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+    #                             world_size=args.world_size, rank=args.rank)
+    #     # torch.distributed.barrier()
+
     if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
-        torch.distributed.barrier()
+        args.world_size = 1
+        args.rank = 0  # global rank
+        args.local_rank = 0
+        if 'SLURM_PROCID' in os.environ:
+            # DDP via SLURM
+            args.local_rank, args.rank, args.world_size = world_info_from_env()
+            # SLURM var -> torch.distributed vars in case needed
+            os.environ['LOCAL_RANK'] = str(args.local_rank)
+            os.environ['RANK'] = str(args.rank)
+            os.environ['WORLD_SIZE'] = str(args.world_size)
+            torch.distributed.init_process_group(
+                backend=args.dist_backend,
+                init_method=args.dist_url,
+                world_size=args.world_size,
+                rank=args.rank,
+            )
+        else:
+            # DDP via torchrun, torch.distributed.launch
+            args.local_rank, _, _ = world_info_from_env()
+            torch.distributed.init_process_group(
+                backend=args.dist_backend,
+                init_method=args.dist_url)
+            args.world_size = torch.distributed.get_world_size()
+            args.rank = torch.distributed.get_rank()
+
+        
+        if torch.cuda.is_available():
+            if args.distributed:
+                device = 'cuda:%d' % args.local_rank
+            torch.cuda.set_device(device)
+            # device = torch.device(device)
+            args.gpu = device
         
     # create model
     set_all_seeds(123)
@@ -371,8 +426,6 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
-
-
     # validation 
     if args.data_name == 'imagenet1000' or args.data_name == 'imagenet100' :
            
@@ -394,6 +447,7 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
 
+    print("Start training")
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
@@ -472,6 +526,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
     end = time.time()
     for i, (images, target) in enumerate(train_loader):
+        print(epoch)
         # measure data loading time
         data_time.update(time.time() - end)
 

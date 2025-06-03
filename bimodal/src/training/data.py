@@ -147,7 +147,7 @@ def get_wds_dataset(args, preprocess_fns, is_train, epoch=0, tokenizer=None):
     input_shards = args.train_data if is_train else args.val_data
     preprocess_train, preprocess_val = preprocess_fns
     preprocess_img = preprocess_train if is_train else preprocess_val
-    return_index = True
+    return_index = is_train
 
     def extract_shard_index(shard_url: str):
         return int(shard_url.split('/')[-1].split('.')[0])

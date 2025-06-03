@@ -503,6 +503,8 @@ def main(args):
             sd = checkpoint["state_dict"]
             if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
                 sd = {k[len('module.'):]: v for k, v in sd.items()}
+            elif args.distributed and not next(iter(sd.items()))[0].startswith('module'):
+                sd = {f"module.{k}": v for k, v in sd.items()}
             model.load_state_dict(sd)
             if optimizer is not None:
                 optimizer.load_state_dict(checkpoint["optimizer"])

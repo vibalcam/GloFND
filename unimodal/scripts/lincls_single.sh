@@ -1,6 +1,6 @@
 #!/bin/bash
 ####
-# Run linear evaluation
+# Run linear evaluation on a single GPU
 ####
 
 dataset="imagenet100"
@@ -21,11 +21,9 @@ for (( i=0; i<$length; i++ )); do
 
     echo "Running on GPU $cuda_device with sample_images $sample_images"
 
-    # python -m debugpy --listen 5678 --wait-for-client lincls.py \
     CUDA_VISIBLE_DEVICES=$cuda_device python lincls.py \
-        --dist-url "tcp://localhost:${port}" \
+        --world-size 1 --workers 6 \
         -b $batch --lr 0.1 --epochs $epochs \
-        --multiprocessing-distributed --world-size 1 --rank 0 --workers 6 \
         --data_name imagenet100 \
         --data $dataset \
         --save_dir lincls_saved \

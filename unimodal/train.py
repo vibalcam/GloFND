@@ -93,9 +93,9 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
-parser.add_argument('--rank', default=-1, type=int,
-                    help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
+# parser.add_argument('--rank', default=-1, type=int,
+#                     help='node rank for distributed training')
+parser.add_argument('--dist-url', default='env://', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
@@ -134,7 +134,7 @@ parser.add_argument('--save_dir', default='./saved_models/', type=str)
 
 
 # sogclr
-parser.add_argument('--loss_type', default='dcl', type=str, choices=['dcl'],
+parser.add_argument('--loss_type', default='dcl', type=str, choices=['dcl', 'cl'],
                     help='loss function to use (default: dcl)')
 parser.add_argument('--glofnd', default='none', type=str, choices=['none', 'glofnd', 'fnd', 'oracle', 'uglofnd', 'disabled'], help='glofnd module to use')
 parser.add_argument('--gamma', default=0.9, type=float,
@@ -143,13 +143,7 @@ parser.add_argument('--learning-rate-scaling', default='sqrt', type=str,
                     choices=['sqrt', 'linear'],
                     help='learing rate scaling (default: sqrt)')
 
-def parse_comma_separated_floats(value):
-    try:
-        return [float(v) for v in value.split(",")]
-    except ValueError:
-        raise argparse.ArgumentTypeError("All values must be floats.")
-
-# CUSTOM ARGUMENTS
+# CUSTOM ARGUMENTS 
 parser.add_argument('--reset_lambda', default=False, type=str2bool, help='reset lambda')
 parser.add_argument('--alpha', default=[0.01], type=float, nargs="+", help='alpha for glofnd')
 parser.add_argument('--start_update', default=0, type=int, help='start to update lambda')
@@ -159,7 +153,7 @@ parser.add_argument('--init_quantile', default=False, type=str2bool, help='init 
 parser.add_argument('--lr_lda', default=1.0, type=float, help='lda learning rate')
 parser.add_argument('--momentum_lda', default=0.95, type=float, help='lda momentum')
 parser.add_argument('--log_dir', default=None, type=str, help='log directory')
-parser.add_argument('--run', default=0, type=int, help='run number')
+parser.add_argument('--run_id', default=0, type=int, help='run number')
 parser.add_argument('--experiment', default='', type=str, help='experiment name')
 
 
@@ -238,46 +232,76 @@ def main():
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
     ngpus_per_node = torch.cuda.device_count()
-    if args.multiprocessing_distributed:
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
-        args.world_size = ngpus_per_node * args.world_size
-        # Use torch.multiprocessing.spawn to launch distributed processes: the
-        # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
-    else:
-        # Simply call main_worker function
-        main_worker(args.gpu, ngpus_per_node, args)
+    main_worker(args.gpu, ngpus_per_node, args)
+
+
+def world_info_from_env():
+    local_rank = 0
+    for v in ('LOCAL_RANK', 'MPI_LOCALRANKID', 'SLURM_LOCALID', 'OMPI_COMM_WORLD_LOCAL_RANK'):
+        if v in os.environ:
+            local_rank = int(os.environ[v])
+            break
+    global_rank = 0
+    for v in ('RANK', 'PMI_RANK', 'SLURM_PROCID', 'OMPI_COMM_WORLD_RANK'):
+        if v in os.environ:
+            global_rank = int(os.environ[v])
+            break
+    world_size = 1
+    for v in ('WORLD_SIZE', 'PMI_SIZE', 'SLURM_NTASKS', 'OMPI_COMM_WORLD_SIZE'):
+        if v in os.environ:
+            world_size = int(os.environ[v])
+            break
+
+    return local_rank, global_rank, world_size
 
 
 def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
 
     # suppress printing if not first GPU on each node
-    if args.multiprocessing_distributed and (args.gpu != 0 or args.rank != 0):
-        def print_pass(*args):
-            pass
-        builtins.print = print_pass
+    # if args.multiprocessing_distributed and (args.gpu != 0 or args.rank != 0):
+    #     def print_pass(*args):
+    #         pass
+    #     builtins.print = print_pass
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
     if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
-        torch.distributed.barrier()
+        args.world_size = 1
+        args.rank = 0  # global rank
+        args.local_rank = 0
+        if 'SLURM_PROCID' in os.environ:
+            # DDP via SLURM
+            args.local_rank, args.rank, args.world_size = world_info_from_env()
+            # SLURM var -> torch.distributed vars in case needed
+            os.environ['LOCAL_RANK'] = str(args.local_rank)
+            os.environ['RANK'] = str(args.rank)
+            os.environ['WORLD_SIZE'] = str(args.world_size)
+            torch.distributed.init_process_group(
+                backend=args.dist_backend,
+                init_method=args.dist_url,
+                world_size=args.world_size,
+                rank=args.rank,
+            )
+        else:
+            # DDP via torchrun, torch.distributed.launch
+            args.local_rank, _, _ = world_info_from_env()
+            torch.distributed.init_process_group(
+                backend=args.dist_backend,
+                init_method=args.dist_url)
+            args.world_size = torch.distributed.get_world_size()
+            args.rank = torch.distributed.get_rank()
+
+        if torch.cuda.is_available():
+            if args.distributed:
+                device = 'cuda:%d' % args.local_rank
+            torch.cuda.set_device(device)
+            # device = torch.device(device)
+            args.gpu = device
         
     # sizes for each dataset
     if args.data_name == 'imagenet100': 
@@ -319,7 +343,7 @@ def main_worker(gpu, ngpus_per_node, args):
             # DistributedDataParallel, we need to divide the batch size
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / args.world_size)
-            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
+            # args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         else:
             model.cuda()
@@ -362,7 +386,7 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         logname = '%s_%s_%s_%s_%s_%s-%s-%s_bz_%s_E%s_WR%s_lr_%.3f_%s_wd_%s_t_%s_g_%s_%s_%s'%(date_str, timestamp_str, args.data_name, args.loss_type, args.arch, method_name, args.dim, args.mlp_dim, global_batch_size, args.epochs, args.warmup_epochs, args.lr, args.learning_rate_scaling, args.weight_decay, args.t, args.gamma, args.optimizer, str(args.alpha) )
         args.log_dir = logname
-    logdir = os.path.join(logname, str(args.run))
+    logdir = os.path.join(logname, str(args.run_id))
     os.makedirs(os.path.join(save_root_path, logdir), exist_ok=True)
     utils.save_json(vars(args), os.path.join(save_root_path, logdir, 'config.json'))
 
@@ -391,7 +415,8 @@ def main_worker(gpu, ngpus_per_node, args):
                 checkpoint = torch.load(args.resume)
             else:
                 # Map model to be loaded to specified single gpu.
-                loc = 'cuda:{}'.format(args.gpu)
+                # loc = 'cuda:{}'.format(args.gpu)
+                loc = args.gpu
                 checkpoint = torch.load(args.resume, map_location=loc)
             args.start_epoch = checkpoint['epoch']
             if args.reset_lambda:
@@ -560,6 +585,22 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
 
         if i % args.print_freq == 0:
             progress.display(i)
+
+    # if args.ref not in [None, 'none']:
+    #     if (epoch ) % 100 == 0:
+    #         if Path(args.ref).exists():
+    #             ref_state_dict = load_pretrained(args.ref, torchvision_models.resnet50(weights=None)).state_dict()
+    #         elif args.ref == 'resnet50':
+    #             # ref_model = torchvision_models.resnet50(weights='DEFAULT')
+    #             ref_state_dict = torch.load("data/resnet50_state_dict.pth", map_location="cpu")
+    #         else:
+    #             raise ValueError('ref model not supported')
+            
+    #         # check reference model has not changed
+    #         assert model.module.ref is not None, "Reference model is not loaded"
+    #         model_state_dict = model.module.ref.state_dict()
+    #         for k in ref_state_dict.keys():
+    #             assert 'fc' in k or torch.allclose(ref_state_dict[k], model_state_dict[k]), f"Reference model has changed: {k}"
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
