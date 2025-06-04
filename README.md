@@ -4,9 +4,17 @@ Code for the ICML 2025 paper, [***Discovering Global False Negatives On the Fly 
 [arXiv](https://arxiv.org/abs/2502.20612)
 [ICML 2025](https://icml.cc/virtual/2025/poster/45576)
 
+---
+
 We propose a novel method to efficiently discover global false negatives for self-supervised contrastive learning. Our method, **Glo**bal **F**alse **N**egative **D**etection (*GloFND*), is designed to enhance contrastive learning models by identifying global false negatives during training so they can be treated appropiately (e.g., being removed from the negative set). GloFND is a simple and efficient method that can be combined with contrastive learning frameworks with negligible computational cost, including unimodal and bimodal scenarios.
 
+![False negative issue in contrastive learning](assets/fn_cl.png)
+
 In this repo, we show how to use *GloFND* for *global contrastive learning* in the unimodal and bimodal scenarios.
+
+**Table of Contents**
+- [Lay Summary](#lay-summary)
+- [Cite](#cite)
 
 ## Lay Summary
 
@@ -16,7 +24,9 @@ We present *GLOFND*, a method that automatically detects false negatives during 
 
 *GLOFND* improves the quality of vector representations and yields more accurate results on tasks like classification and image–text retrieval. It is easy to apply, handles large datasets effectively, and integrates seamlessly into existing contrastive learning frameworks, boosting their performance.
 
-## Reference
+![False negative examples](assets/examples_fn.png)
+
+## Cite
 
 If you find our work helpful, please cite our paper:
 ```bibtex
